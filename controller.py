@@ -3,29 +3,20 @@ import time
 import json
 import uuid
 import argparse
+import csv
+import os
 from datetime import datetime, timezone
 
 import aiohttp
-from google.cloud import firestore
-
 from payloads import generate_payload
 
 
-# ---------- FIRESTORE ----------
-db = firestore.Client()
-
-def write_to_firestore(doc):
-    try:
-        db.collection("experiment_results").add(doc)
-    except Exception as e:
-        print("Firestore write failed:", e)
-
-
-# ---------- HELPERS ----------
+# ---------------- HELPERS ----------------
 def now_ms():
     return int(time.time() * 1000)
 
 
+# ---------------- REQUEST FUNCTION ----------------
 async def post_json(session, url, payload, timeout_s):
     t0 = time.perf_counter()
 
@@ -39,11 +30,31 @@ async def post_json(session, url, payload, timeout_s):
                 body = {"raw_text": await resp.text()}
 
         t1 = time.perf_counter()
+        rtt_ms = round((t1 - t0) * 1000, 3)
+
+        # ---- Extract timestamps ----
+        t_sent = payload.get("t_sent_unix_ms")
+        t_received = body.get("t_received")
+        t_processed = body.get("t_processed")
+        t_response = now_ms()
+
+        # ---- Compute metrics ----
+        processing_time = None
+        network_time = None
+        total_time = None
+
+        if t_sent and t_received and t_processed:
+            processing_time = t_processed - t_received
+            total_time = t_response - t_sent
+            network_time = total_time - processing_time
 
         return {
             "ok": True,
             "status": resp.status,
-            "rtt_ms": round((t1 - t0) * 1000, 3),
+            "rtt_ms": rtt_ms,
+            "processing_time_ms": processing_time,
+            "network_time_ms": network_time,
+            "total_time_ms": total_time,
             "resp": body,
         }
 
@@ -58,6 +69,7 @@ async def post_json(session, url, payload, timeout_s):
         }
 
 
+# ---------------- RUN ONE TEST ----------------
 async def run_once(edge_url, cloud_url, payload, timeout_s):
     async with aiohttp.ClientSession() as session:
         edge_task = post_json(session, edge_url, payload, timeout_s)
@@ -68,9 +80,29 @@ async def run_once(edge_url, cloud_url, payload, timeout_s):
     return {"payload": payload, "edge": edge_res, "cloud": cloud_res}
 
 
-# ---------- MAIN LOOP ----------
+# ---------------- MAIN LOOP ----------------
 async def run_loop(args):
     profiles = ["small", "medium", "large"] if args.benchmark else [args.profile]
+
+    csv_file = "results.csv"
+
+    # Create CSV with headers if it doesn't exist
+    if not os.path.exists(csv_file):
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "timestamp",
+                "profile",
+                "payload_bytes",
+                "edge_rtt_ms",
+                "cloud_rtt_ms",
+                "edge_total_ms",
+                "cloud_total_ms",
+                "edge_processing_ms",
+                "cloud_processing_ms",
+                "edge_network_ms",
+                "cloud_network_ms"
+            ])
 
     edge_rtts = []
     cloud_rtts = []
@@ -103,51 +135,51 @@ async def run_loop(args):
             edge_rtts.append(edge["rtt_ms"])
             cloud_rtts.append(cloud["rtt_ms"])
 
+            # ---- Console output ----
             print(f"[{ts}] seq={seq} profile={profile} payload_bytes={payload_bytes}")
-            print(f" EDGE  ok={edge['ok']}  status={edge.get('status')}  rtt={edge['rtt_ms']}")
-            print(f" CLOUD ok={cloud['ok']}  status={cloud.get('status')}  rtt={cloud['rtt_ms']}\n")
+            print(f" EDGE  rtt={edge['rtt_ms']} ms total={edge.get('total_time_ms')}")
+            print(f" CLOUD rtt={cloud['rtt_ms']} ms total={cloud.get('total_time_ms')}\n")
 
-            doc = {
-                "profile": profile,
-                "timestamp": ts,
-                "payload_bytes": payload_bytes,
-                "edge_rtt_ms": edge["rtt_ms"],
-                "cloud_rtt_ms": cloud["rtt_ms"],
-                "edge_ok": edge["ok"],
-                "cloud_ok": cloud["ok"],
-                "scenario": args.scenario,
-            }
-
-            write_to_firestore(doc)
+            # ---- Save to CSV ----
+            with open(csv_file, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    ts,
+                    profile,
+                    payload_bytes,
+                    edge["rtt_ms"],
+                    cloud["rtt_ms"],
+                    edge.get("total_time_ms"),
+                    cloud.get("total_time_ms"),
+                    edge.get("processing_time_ms"),
+                    cloud.get("processing_time_ms"),
+                    edge.get("network_time_ms"),
+                    cloud.get("network_time_ms")
+                ])
 
             if seq != args.count:
                 await asyncio.sleep(args.interval)
 
-    # ---------- FINAL SUMMARY ----------
+    # ---- FINAL SUMMARY ----
     avg_edge = sum(edge_rtts) / len(edge_rtts) if edge_rtts else 0
     avg_cloud = sum(cloud_rtts) / len(cloud_rtts) if cloud_rtts else 0
 
     summary = {
-        "edge_rtt_ms": round(avg_edge, 2),
-        "cloud_rtt_ms": round(avg_cloud, 2),
-        "edge_ok": True,
-        "cloud_ok": True,
+        "edge_avg_rtt_ms": round(avg_edge, 2),
+        "cloud_avg_rtt_ms": round(avg_cloud, 2),
     }
 
     print("\n===== FINAL SUMMARY =====")
     print(json.dumps(summary, indent=2))
 
-    # IMPORTANT → worker.py reads this JSON
-    print(json.dumps(summary))
 
-
-# ---------- CLI ----------
+# ---------------- CLI ----------------
 def main():
-    parser = argparse.ArgumentParser(description="FYP Controller Benchmark")
+    parser = argparse.ArgumentParser(description="FYP Controller Benchmark (CSV Version)")
 
     parser.add_argument("--edge-url", required=True)
     parser.add_argument("--cloud-url", required=True)
-    parser.add_argument("--count", type=int, default=1)
+    parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=3.0)
 
@@ -158,7 +190,6 @@ def main():
     )
 
     parser.add_argument("--benchmark", action="store_true")
-    parser.add_argument("--scenario", default="live_test")
 
     args = parser.parse_args()
 

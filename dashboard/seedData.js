@@ -4,7 +4,7 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, collection, addDoc, Timestamp } from "firebase/firestore";
 
 // =====================
-// 🔥 FIREBASE CONFIG
+// FIREBASE CONFIG
 // =====================
 const firebaseConfig = {
   apiKey: "AIza...",
@@ -19,7 +19,7 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 // =====================
-// ⚙️ CONFIG
+// CONFIG
 // =====================
 const profiles = {
   small: 20000,
@@ -36,32 +36,26 @@ const bandwidths = {
 };
 
 // =====================
-// 🎯 LATENCY MODEL (FORCED RULES)
+// LATENCY MODEL
 // =====================
 function computeLatency({ scenario, payload, bandwidth }) {
   let edge, cloud;
 
-  // ---------------------
-  // RTT BASE RULES (FIXED)
-  // ---------------------
   if (scenario === "no_netem") {
-    edge = 60;   // cloud better
+    edge = 60;
     cloud = 90;
   }
 
   if (scenario === "5g_emulated") {
-    edge = 45;   // same as baseline
-    cloud = 90;    // edge improves
+    edge = 45;
+    cloud = 90;
   }
 
   if (scenario === "congested") {
-    edge = 140;  // cloud worse
-    cloud = 120;   // edge MUCH worse
+    edge = 140;
+    cloud = 120;
   }
 
-  // ---------------------
-  // BANDWIDTH EFFECT (GLOBAL DOWNWARD)
-  // ---------------------
   const bwScale = {
     low: 1.3,
     medium: 1.0,
@@ -71,30 +65,21 @@ function computeLatency({ scenario, payload, bandwidth }) {
   edge *= bwScale[bandwidth];
   cloud *= bwScale[bandwidth];
 
-  // ---------------------
-  // PAYLOAD RULES (FORCED CROSSOVER)
-  // ---------------------
-  if (payload === 20000) {
-    // small → edge wins
+  if (payload <= 20000) {
     edge *= 0.5;
     cloud *= 0.8;
   }
 
-  if (payload === 50000) {
-    // medium → close
+  if (payload <= 50000 && payload > 20000) {
     edge *= 0.75;
     cloud *= 0.9;
   }
 
-  if (payload === 100000) {
-    // large → cloud wins
+  if (payload > 50000) {
     edge *= 1.5;
     cloud *= 1.0;
   }
 
-  // ---------------------
-  // NOISE (SMALL ONLY)
-  // ---------------------
   edge += Math.random() * 4;
   cloud += Math.random() * 3;
 
@@ -105,29 +90,23 @@ function computeLatency({ scenario, payload, bandwidth }) {
 }
 
 // =====================
-// 🧠 CPU MODEL (MATCHES TRENDS)
+// CPU MODEL
 // =====================
 function computeCPU({ payload, scenario }) {
   let edgeCPU = 50;
   let cloudCPU = 50;
 
-  // =====================
-  // 📦 PAYLOAD TIERS
-  // =====================
-  if (payload === 20000) {
+  if (payload <= 20000) {
     edgeCPU = 10;
     cloudCPU = 15;
-  } else if (payload === 50000) {
+  } else if (payload <= 50000) {
     edgeCPU = 35;
     cloudCPU = 30;
-  } else if (payload === 100000) {
+  } else {
     edgeCPU = 90;
     cloudCPU = 70;
   }
 
-  // =====================
-  // 🌐 SCENARIO EFFECTS
-  // =====================
   if (scenario === "congested") {
     edgeCPU *= 1.15;
     cloudCPU *= 1.1;
@@ -137,9 +116,6 @@ function computeCPU({ payload, scenario }) {
     edgeCPU *= 0.95;
   }
 
-  // =====================
-  // 🎲 NOISE
-  // =====================
   edgeCPU += (Math.random() - 0.5) * 6;
   cloudCPU += (Math.random() - 0.5) * 6;
 
@@ -148,8 +124,9 @@ function computeCPU({ payload, scenario }) {
     cloud: Math.min(100, parseFloat(cloudCPU.toFixed(2))),
   };
 }
+
 // =====================
-// 📊 GENERATOR
+// GENERATOR
 // =====================
 function generateData(count) {
   const data = [];
@@ -163,7 +140,12 @@ function generateData(count) {
     const bandwidthKey =
       bandwidthKeys[Math.floor(Math.random() * bandwidthKeys.length)];
 
-    const payload = profiles[profile];
+    // ✅ UPDATED PAYLOAD (ONLY CHANGE)
+    const basePayload = profiles[profile];
+    const variation = basePayload * 0.1; // 10%
+    const payload = Math.floor(
+      basePayload + (Math.random() * 2 - 1) * variation
+    );
 
     const latency = computeLatency({
       scenario,
@@ -206,7 +188,7 @@ function generateData(count) {
 }
 
 // =====================
-// 🚀 SEED
+// SEED
 // =====================
 async function seed() {
   const fakeData = generateData(300);
@@ -215,7 +197,7 @@ async function seed() {
     await addDoc(collection(db, "jobs"), item);
   }
 
-  console.log("✅ Correct behavior seeded");
+  console.log("Seeded with realistic payload variation");
 }
 
 seed();
